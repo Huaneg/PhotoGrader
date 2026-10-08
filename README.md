@@ -93,20 +93,23 @@ PhotoGrader/
 │   │   ├── FileHasher.cs          #   MD5
 │   │   ├── FileMover.cs           #   归档移动
 │   │   ├── FileDeleter.cs         #   删除（走系统回收站）
+│   │   ├── AppSettings.cs         #   应用设置的读写（记住图库路径）
 │   │   └── Crc32.cs
 │   └── PhotoGrader.App/           # WPF 宿主
 │       ├── MainWindow.xaml(.cs)   #   窗口、命令分发、与前端通信
 │       ├── Services/
 │       │   ├── MiniHttpServer.cs  #   回环 HTTP 服务
+│       │   ├── EmbeddedWebAssets.cs #  内嵌前端资源的读取（单文件发布用）
 │       │   └── ThumbnailService.cs#   缩略图生成与两级缓存
-│       └── wwwroot/               # 前端（原样拷贝到输出目录）
+│       └── wwwroot/               # 前端（同时内嵌进程序集）
 │           ├── index.html         #   结构与内联 SVG 图标库
 │           ├── style.css
 │           ├── app.js
 │           └── MiSansVF.subset.woff2
 ├── tests/PhotoGrader.Core.Tests/  # xUnit 测试
 ├── tools/                         # 开发辅助脚本，不参与主程序构建
-└── dn.sh                          # dotnet 构建包装脚本
+├── dn.sh                          # dotnet 构建包装脚本
+└── publish.sh                     # 单文件 exe 发布脚本
 ```
 
 ---
@@ -141,8 +144,31 @@ dotnet test
 ./dn.sh test
 ```
 
-当前 **97 个测试用例全部通过**，覆盖 PNG 尾块编解码、评分读写往返、
-图库索引比对、MD5 重复检测、文件移动与回收站删除等核心路径。
+当前 **107 个测试用例全部通过**，覆盖 PNG 尾块编解码、评分读写往返、
+图库索引比对、MD5 重复检测、文件移动与回收站删除、设置持久化等核心路径。
+
+---
+
+## 发布成单个 exe
+
+```bash
+./publish.sh
+```
+
+产物：`src/PhotoGrader.App/bin/Release/net8.0-windows/win-x64/publish/PhotoGrader.App.exe`
+
+**目录里只有这一颗 exe**，没有任何附属文件 —— 前端资源（HTML / CSS / JS / 字体）
+已内嵌进程序集，启动时直接从内存提供给内置的 Web 服务，不再依赖旁边的 `wwwroot` 目录。
+
+| 方式 | 体积 | 目标机器要求 |
+| --- | --- | --- |
+| **默认（当前配置）** | 约 **10 MB** | 需先装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) |
+| 自包含 | 约 150 MB | 什么都不用装，双击即跑 |
+
+想换成自包含，把 `publish.sh` 里的 `--self-contained false` 改成 `true` 即可。
+
+> 开发期不受影响：`dotnet build` 仍会把 `wwwroot` 拷到输出目录，
+> 静态文件服务是「磁盘优先，找不到才用内嵌」，所以改完前端刷新就能看到效果。
 
 ---
 
@@ -150,7 +176,15 @@ dotnet test
 
 | 参数 | 说明 |
 | --- | --- |
-| `--root <路径>` | 指定图库根目录。省略时使用默认路径 `D:\GPT Image` |
+| `--root <路径>` | 临时指定图库根目录（调试用，**不会被记住**） |
+
+省略 `--root` 时，按以下优先级决定加载哪个目录：
+
+1. **上次选择过的目录** —— 记在 `%APPDATA%\PhotoGrader\settings.json`
+2. **系统「图片」文件夹** —— 走 Windows API 解析，不写死路径，换机器、换用户名都成立
+3. 用户主目录下的 `Pictures`（极少数情况下的兜底）
+
+点顶栏的「切换图库路径」选一个新目录，程序会自动记住，下次启动直接用它。
 
 ### 调试参数
 
@@ -211,7 +245,12 @@ PhotoGrader.App.exe --root "E:\Photos" --capture shot.png --lightbox 0
 
 评分本身**不在**这些目录里 —— 它在每张 PNG 文件自己的尾部。删掉 `.pgcache/` 只是让下次启动慢一点。
 
-日志写在程序自己的目录（`photograder.log`）。
+另有少量应用级数据放在 `%APPDATA%\PhotoGrader\`：
+
+| 文件 | 说明 |
+| --- | --- |
+| `settings.json` | 记住你上次选的图库目录 |
+| `photograder.log` | 运行日志。放在这里而不是 exe 旁边，是因为单文件分发时 exe 可能被放进没有写权限的目录 |
 
 ---
 
@@ -219,7 +258,6 @@ PhotoGrader.App.exe --root "E:\Photos" --capture shot.png --lightbox 0
 
 - **只处理 PNG**。扫描时按扩展名过滤，JPEG / TIFF / HEIC 等不会被载入。
   评分写入依赖 PNG 的块结构，要支持其他格式需要另做容器封装。
-- **默认图库路径是 `D:\GPT Image`**，这是作者本机的路径。请用 `--root` 指定你自己的目录。
 - 窗口当前为固定布局，未做小屏适配。
 
 ---

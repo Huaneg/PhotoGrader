@@ -13,9 +13,19 @@ namespace PhotoGrader.App;
 
 public partial class MainWindow : Window
 {
-    private const string DefaultLibraryRoot = @"D:\GPT Image";
+    /// <summary>
+    /// 日志位置。刻意放在 %APPDATA% 而不是 exe 旁边 ——
+    /// 单文件分发时 exe 很可能被放到 Program Files 这类没有写权限的目录。
+    /// </summary>
+    private static readonly string LogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "PhotoGrader",
+        "photograder.log");
 
-    private static readonly string LogPath = Path.Combine(AppContext.BaseDirectory, "photograder.log");
+    private static bool _logDirectoryReady;
+
+    /// <summary>设置文件位置，用于记住用户选过的图库根目录。</summary>
+    private static readonly string SettingsPath = AppSettingsStore.DefaultPath;
 
     private readonly string _wwwRoot;
     private string _libraryRoot;
@@ -27,12 +37,62 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        _libraryRoot = ReadArgument("--root") ?? DefaultLibraryRoot;
+        _libraryRoot = ResolveInitialLibraryRoot();
         _wwwRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
         _thumbnails = CreateThumbnailsFor(_libraryRoot);
         _thumbnails.OnDiagnostic = Log;
 
         Loaded += OnLoaded;
+    }
+
+    /// <summary>
+    /// 决定启动时加载哪个图库，优先级从高到低：
+    /// ① 命令行 --root（调试用，不落盘）
+    /// ② 上次用户选择的路径（settings.json）
+    /// ③ 系统「图片」文件夹 —— 走 API 解析而非写死路径，换一台机器、换一个用户名都成立
+    /// ④ 用户主目录下的 Pictures（API 返回空时的兜底，极少发生）
+    /// </summary>
+    private static string ResolveInitialLibraryRoot()
+    {
+        string? fromArgs = ReadArgument("--root");
+        if (!string.IsNullOrWhiteSpace(fromArgs)) return fromArgs;
+
+        string? saved = AppSettingsStore.Load(SettingsPath).LibraryRoot;
+        if (!string.IsNullOrWhiteSpace(saved))
+        {
+            // 即便目录暂时不存在也照用 —— 可能是断开的网络盘，
+            // 直接换成别的目录反而让人一头雾水，交给加载失败的提示去说明。
+            return saved;
+        }
+
+        string pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+        if (string.IsNullOrWhiteSpace(pictures))
+        {
+            pictures = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Pictures");
+        }
+
+        // 首次启动：系统「图片」文件夹通常已存在；万一没有则建出来，
+        // 免得用户第一次打开就看到一句「目录不存在」。
+        try
+        {
+            if (!Directory.Exists(pictures)) Directory.CreateDirectory(pictures);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log($"[init] 无法创建默认图库目录 {pictures}：{ex.Message}");
+        }
+
+        return pictures;
+    }
+
+    /// <summary>把当前图库根目录记到设置文件，下次启动直接用它。</summary>
+    private static void RememberLibraryRoot(string root)
+    {
+        bool ok = AppSettingsStore.Save(SettingsPath, new AppSettings { LibraryRoot = root });
+        Log(ok
+            ? $"[settings] 已记住图库路径 {root}"
+            : $"[settings] 图库路径写入失败 {root}");
     }
 
     /// <summary>读取形如 --name value 的命令行参数。args 为 null 表示未提供。</summary>
@@ -47,6 +107,13 @@ public partial class MainWindow : Window
     {
         try
         {
+            if (!_logDirectoryReady)
+            {
+                string? directory = Path.GetDirectoryName(LogPath);
+                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                _logDirectoryReady = true;
+            }
+
             File.AppendAllText(LogPath, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -760,6 +827,13 @@ public partial class MainWindow : Window
 
         Log($"[lib] 切换图库 {_libraryRoot} → {picked}");
         _libraryRoot = picked;
+
+        // 记住这次选择，下次启动直接用它。
+        // 但如果是用 --root 临时指定的，就别覆盖用户已保存的偏好。
+        if (string.IsNullOrWhiteSpace(ReadArgument("--root")))
+        {
+            RememberLibraryRoot(picked);
+        }
 
         // 图库切换后旧索引全部失效，前端需要整体重置
         PostToWeb(new { type = "rootChanged", path = _libraryRoot });

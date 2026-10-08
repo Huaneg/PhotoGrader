@@ -31,7 +31,7 @@ public sealed class MiniHttpServer : IDisposable
         Func<string, int, byte[]?> thumbnailProvider,
         Func<string, byte[]?>? previewProvider = null)
     {
-        _staticRoot = staticRoot;
+        _staticRoot = Path.GetFullPath(staticRoot);
         _thumbnailProvider = thumbnailProvider;
         _previewProvider = previewProvider ?? (_ => null);
 
@@ -199,21 +199,51 @@ public sealed class MiniHttpServer : IDisposable
     {
         if (path is "/" or "") path = "/index.html";
 
-        string relative = path.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        string full = Path.GetFullPath(Path.Combine(_staticRoot, relative));
+        string relativePath = path.TrimStart('/');
+        string contentType = ContentTypeFor(relativePath);
 
-        // 防止路径穿越
-        if (!full.StartsWith(_staticRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+        // 字体是内容恒定的大文件（MiSansVF 子集有 8 MB 级），
+        // 用 no-cache 会导致每次启动都重新拉一遍，首屏明显变慢。
+        // 其余资源保持 no-cache，便于开发期改完刷新即生效。
+        string cache = contentType.StartsWith("font/", StringComparison.Ordinal)
+            ? "Cache-Control: max-age=604800, immutable\r\n"
+            : "Cache-Control: no-cache\r\n";
+
+        byte[]? body = await ReadStaticAsync(relativePath);
+        if (body is null)
         {
             await WriteTextAsync(stream, 404, "Not Found", "文件不存在");
             return;
         }
 
-        string contentType = Path.GetExtension(full).ToLowerInvariant() switch
+        await WriteResponseAsync(stream, 200, "OK", contentType, body, cache);
+    }
+
+    /// <summary>
+    /// 取静态资源内容：先读磁盘（开发期改完前端刷新即生效），
+    /// 磁盘上没有则回退到内嵌资源（单文件发布时旁边根本没有 wwwroot 目录）。
+    /// </summary>
+    private async Task<byte[]?> ReadStaticAsync(string relativePath)
+    {
+        string relative = relativePath.Replace('/', Path.DirectorySeparatorChar);
+        string full = Path.GetFullPath(Path.Combine(_staticRoot, relative));
+
+        // 防止路径穿越
+        if (full.StartsWith(_staticRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(full))
+        {
+            return await File.ReadAllBytesAsync(full);
+        }
+
+        return EmbeddedWebAssets.TryGet(relativePath);
+    }
+
+    private static string ContentTypeFor(string relativePath) =>
+        Path.GetExtension(relativePath).ToLowerInvariant() switch
         {
             ".html" => "text/html; charset=utf-8",
             ".css" => "text/css; charset=utf-8",
             ".js" => "application/javascript; charset=utf-8",
+            ".json" => "application/json; charset=utf-8",
             ".png" => "image/png",
             ".jpg" or ".jpeg" => "image/jpeg",
             ".svg" => "image/svg+xml",
@@ -222,17 +252,6 @@ public sealed class MiniHttpServer : IDisposable
             ".ttf" => "font/ttf",
             _ => "application/octet-stream",
         };
-
-        // 字体是内容恒定的大文件（MiSansVF.woff2 有十几 MB），
-        // 用 no-cache 会导致每次启动都重新拉一遍，首屏明显变慢。
-        // 其余资源保持 no-cache，便于开发期改完刷新即生效。
-        string cache = contentType.StartsWith("font/", StringComparison.Ordinal)
-            ? "Cache-Control: max-age=604800, immutable\r\n"
-            : "Cache-Control: no-cache\r\n";
-
-        byte[] body = await File.ReadAllBytesAsync(full);
-        await WriteResponseAsync(stream, 200, "OK", contentType, body, cache);
-    }
 
     private static async Task<string?> ReadLineAsync(NetworkStream stream, CancellationToken token)
     {
