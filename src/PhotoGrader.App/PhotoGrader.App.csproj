@@ -20,6 +20,13 @@
     <!-- 不把第三方程序集的 XML 文档注释拷到输出/发布目录。
          WebView2 会带 3 个 .xml 进来，单文件发布时它们会散落在 exe 旁边。 -->
     <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+
+    <!-- 版本信息。会写进 exe 的文件属性，发布时与 tag 保持一致 -->
+    <Version>1.0.0</Version>
+    <Product>PhotoGrader</Product>
+    <Description>本地优先的 PNG 图片筛选与重复清理工具</Description>
+    <Authors>Huaneg</Authors>
+    <Copyright>Copyright (c) 2026 Huaneg</Copyright>
   </PropertyGroup>
 
   <ItemGroup>
